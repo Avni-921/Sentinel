@@ -12,7 +12,8 @@ class Settings(BaseSettings):
 
     - `extra="ignore"` lets `.env` keep legacy keys (`POSTGRES_URI`, `REDIS_URL`,
       old Groq keys, etc.) without failing startup.
-    - Required fields raise a clear validation error at import time if missing.
+    - Environment is loaded once, but service-specific requirements are enforced
+      only when that service is actually used.
     """
 
     model_config = SettingsConfigDict(
@@ -22,31 +23,31 @@ class Settings(BaseSettings):
     )
 
     # --- JINA AI (embeddings + reranker) ---
-    JINA_API_KEY: str
+    JINA_API_KEY: str | None = None
 
     # --- OPENAI LLM ---
-    OPENAI_API_KEY: str
+    OPENAI_API_KEY: str | None = None
     JUDGE_OPENAI_API_KEY: str | None = None
 
     # --- PORTKEY LLM GATEWAY ---
-    PORTKEY_API_KEY: str
+    PORTKEY_API_KEY: str | None = None
     PORTKEY_PRIMARY_SLUG: str = "marathon-api"
     PORTKEY_FALLBACK_SLUG: str = "anthropic-fallback"
     # Portkey saved config is referenced by its system-generated `pc-...` ID.
     # Required when block_inline_config is enabled on the workspace.
-    PORTKEY_PRIMARY_CONFIG_ID: str
+    PORTKEY_PRIMARY_CONFIG_ID: str | None = None
 
     # --- QDRANT VECTOR DB ---
-    QDRANT_URL: str = Field(validation_alias=AliasChoices("QDRANT_URL", "QDRANT_CLUSTER_ENDPOINT"))
+    QDRANT_URL: str | None = Field(default=None, validation_alias=AliasChoices("QDRANT_URL", "QDRANT_CLUSTER_ENDPOINT"))
     QDRANT_API_KEY: str | None = None
     QDRANT_COLLECTION: str = "enterprise_rag"
 
     # --- NEON SERVERLESS POSTGRES (LangGraph checkpointer) ---
-    NEON_DB_URL: str
+    NEON_DB_URL: str | None = None
 
     # --- UPSTASH REDIS (rate limiting) ---
-    UPSTASH_REDIS_REST_URL: str
-    UPSTASH_REDIS_REST_TOKEN: str
+    UPSTASH_REDIS_REST_URL: str | None = None
+    UPSTASH_REDIS_REST_TOKEN: str | None = None
 
     # --- API SAFETY ---
     API_KEY: str | None = Field(default=None, alias="RAG_API_KEY")
@@ -69,10 +70,21 @@ class Settings(BaseSettings):
             return None
         return v
 
+    @staticmethod
+    def _required(value: str | None, env_name: str, purpose: str) -> str:
+        """Raise a clear error only when a specific service needs a missing setting."""
+        if value:
+            return value
+        raise ValueError(f"{env_name} is required for {purpose}. Set it in .env or the environment.")
+
     @property
     def judge_api_key(self) -> str:
         """Dedicated judge key, falling back to the main OpenAI key."""
-        return self.JUDGE_OPENAI_API_KEY or self.OPENAI_API_KEY
+        return self.JUDGE_OPENAI_API_KEY or self._required(
+            self.OPENAI_API_KEY,
+            "OPENAI_API_KEY",
+            "judge LLM access",
+        )
 
     @property
     def postgres_uri(self) -> str:
@@ -81,7 +93,11 @@ class Settings(BaseSettings):
         Serverless Postgres closes idle connections, so append TCP keepalive
         options to keep the connection pool healthy between requests.
         """
-        base = self.NEON_DB_URL.rstrip("/")
+        base = self._required(
+            self.NEON_DB_URL,
+            "NEON_DB_URL",
+            "Postgres checkpointer",
+        ).rstrip("/")
         keepalive = "keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=5"
         if "?" in base:
             return f"{base}&{keepalive}"
@@ -95,8 +111,19 @@ class Settings(BaseSettings):
         used as the Redis password under the default username. The result is
         passed to `limits` for rate limiting and to the health checker.
         """
-        host = self.UPSTASH_REDIS_REST_URL.replace("https://", "").rstrip("/")
-        token = quote(self.UPSTASH_REDIS_REST_TOKEN, safe="")
+        host = self._required(
+            self.UPSTASH_REDIS_REST_URL,
+            "UPSTASH_REDIS_REST_URL",
+            "Redis rate limiting",
+        ).replace("https://", "").rstrip("/")
+        token = quote(
+            self._required(
+                self.UPSTASH_REDIS_REST_TOKEN,
+                "UPSTASH_REDIS_REST_TOKEN",
+                "Redis rate limiting",
+            ),
+            safe="",
+        )
         netloc = f"default:{token}@{host}"
         return urlunsplit(("rediss", netloc, "/0", "ssl_cert_reqs=required", ""))
 

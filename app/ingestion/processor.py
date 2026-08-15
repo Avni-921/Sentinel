@@ -32,11 +32,15 @@ from app.services.retrieval.embedding import embed_texts, get_embedding_dim
 # Local folder where parsed + chunked JSON metadata is saved (replaces GCS processed bucket)
 PROCESSED_DATA_DIR = "processed_data"
 
-# Initialize Qdrant Client
-qdrant_client = QdrantClient(
-    url=settings.QDRANT_URL,
-    api_key=settings.QDRANT_API_KEY,
-)
+
+def _get_qdrant_client() -> QdrantClient:
+    """Create the Qdrant client only when ingestion actually runs."""
+    if not settings.QDRANT_URL:
+        raise ValueError("QDRANT_URL (or QDRANT_CLUSTER_ENDPOINT) is required for ingestion.")
+    return QdrantClient(
+        url=settings.QDRANT_URL,
+        api_key=settings.QDRANT_API_KEY,
+    )
 
 
 def save_processed_locally(data: dict, source_type: str, filename: str) -> str:
@@ -49,7 +53,7 @@ def save_processed_locally(data: dict, source_type: str, filename: str) -> str:
     return dest
 
 
-def process_file(file_path: str, filename: str, source_type: str):
+def process_file(file_path: str, filename: str, source_type: str, qdrant_client: QdrantClient):
     """Parse → chunk → save locally → embed → index in Qdrant."""
     with logfire.span("Processing File", file=filename, source=source_type):
         try:
@@ -113,13 +117,13 @@ def process_file(file_path: str, filename: str, source_type: str):
             logfire.error(f"Failed to process {filename}: {e}")
 
 
-def process_directory(dir_path: str, source_type: str):
+def process_directory(dir_path: str, source_type: str, qdrant_client: QdrantClient):
     """Process every file in a directory."""
     with logfire.span("Scanning Directory", path=dir_path, source=source_type):
         files = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f))]
         logfire.info(f"Found {len(files)} files in {dir_path}.")
         for filename in files:
-            process_file(os.path.join(dir_path, filename), filename, source_type)
+            process_file(os.path.join(dir_path, filename), filename, source_type, qdrant_client)
 
 
 def run_universal_ingestion(base_dir: str, explicit_source_type: str = None, wipe: bool = False):
@@ -128,6 +132,7 @@ def run_universal_ingestion(base_dir: str, explicit_source_type: str = None, wip
     Pass --wipe to drop and recreate the Qdrant collection before ingestion.
     """
     with logfire.span("Universal Ingestion Started", base_directory=base_dir):
+        qdrant_client = _get_qdrant_client()
         # Wipe collection if requested
         if wipe:
             with logfire.span("Wiping Collection"):
@@ -157,11 +162,11 @@ def run_universal_ingestion(base_dir: str, explicit_source_type: str = None, wip
                 base_name = os.path.basename(os.path.normpath(base_dir)).lower()
                 source_type = "true" if "true" in base_name else "noisy" if "noisy" in base_name else "general"
             logfire.info(f"No sub-folders found — processing '{base_dir}' as '{source_type}'.")
-            process_directory(base_dir, source_type)
+            process_directory(base_dir, source_type, qdrant_client)
         else:
             for subdir in subdirs:
                 source_type = "true" if "true" in subdir.lower() else "noisy" if "noisy" in subdir.lower() else subdir
-                process_directory(os.path.join(base_dir, subdir), source_type)
+                process_directory(os.path.join(base_dir, subdir), source_type, qdrant_client)
 
 
 if __name__ == "__main__":
